@@ -9,10 +9,10 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores.utils import DistanceStrategy
 from tqdm import tqdm
-from transformers.agents import Tool, HfEngine, ReactJsonAgent
+from transformers.agents import ReactJsonAgent
 from huggingface_hub import InferenceClient
 import logging
-from IPython.display import display, Markdown
+# from IPython.display import display, Markdown
 
 from utils.openai_engine import OpenAIEngine
 from utils.retriever_tool import RetrieverTool
@@ -25,14 +25,9 @@ logger = logging.getLogger(__name__)
 CONTENT_PATH_DIR = "/Users/johnday/repos/md"
 INDEX_DIR = f"{CONTENT_PATH_DIR}/faiss_index_hybris"
 MAX_ITERATIONS = 6
-VERBOSE = 0
+VERBOSE = -1
 chunk_size = 200
 chunk_overlap = 20
-
-# RUNTIME
-question = "How can I task server"
-# retriever k at retriever_tool
-TEMPERATURE = 0.5
 
 ##################
 # FUNCTIONS
@@ -65,6 +60,9 @@ def load_content_files(content_dir: str) -> list[Document]:
     return get_data(content_dir)
 
 def run_agentic_rag(question: str, agent) -> str:
+    def clean_answer(answer: str) -> str:
+        return answer.replace("**", "")
+
     # Function to run the agent
     enhanced_question = f"""Using the information contained in your knowledge base, which you can access with the 'retriever' tool,
 give a comprehensive answer to the question below.
@@ -76,7 +74,7 @@ Your queries should not be questions but affirmative form sentences: e.g. rather
 Question:
 {question}"""
 
-    return agent.run(enhanced_question)
+    return clean_answer(agent.run(enhanced_question))
 
 def embedding_model():
     return HuggingFaceEmbeddings(model_name="thenlper/gte-small")
@@ -124,6 +122,16 @@ def pipeline():
 def load_vectordb(vectordb_path: str, embeddings: Embeddings) -> FAISS:
     return FAISS.load_local(folder_path=vectordb_path, embeddings=embeddings, allow_dangerous_deserialization=True)
 
+def print_metadata(metadata):
+    print("METADATA:")
+    metadata_ids = []
+    i = 1
+    for index, entry in enumerate(metadata, start=1):
+        if entry['id'] not in metadata_ids:
+            print(f"{i}. {entry['title'].replace('-', ' ').title()}:  \"{entry['id']}\"\n")
+        metadata_ids.append(entry['id'])
+        i += 1
+
 
 # MAIN
 def main(args) -> None:
@@ -132,20 +140,24 @@ def main(args) -> None:
     else:
         vectordb = load_vectordb(f"{INDEX_DIR}", embedding_model())
 
-    retriever_tool = RetrieverTool(vectordb)
-
-    llm_engine = OpenAIEngine(temperature=TEMPERATURE)
-
-    agent = ReactJsonAgent(tools=[retriever_tool], llm_engine=llm_engine, max_iterations=MAX_ITERATIONS, verbose=VERBOSE)
+    retriever_tool = RetrieverTool(vectordb, k=args.retriver_k)
+    llm_engine = OpenAIEngine(temperature=args.temperature, model_name=args.model)
 
     while True:
-        question = input("Ask a question: ")
-        if question.lower() == "exit" or question.lower() == "quit" or question.lower() == "q":
+        question = input("QUESTION: ")
+        question_lower = question.lower()
+        if question_lower == "exit" or question_lower == "quit" or question_lower == "q" or question_lower == "":
             break
 
+        agent = ReactJsonAgent(tools=[retriever_tool], llm_engine=llm_engine, max_iterations=MAX_ITERATIONS, verbose=VERBOSE)
+        agent.logger.setLevel(logging.CRITICAL)
+
         answer = run_agentic_rag(question, agent)
-        print(f"Question: {question}")
-        print(f"Answer: {answer}\n\n")
+        print(f"\nANSWER: {answer}\n")
+        print_metadata(retriever_tool.metadata)
+        retriever_tool.reset_metadata()
+        print()
+        print()
 
 ##################
 # ENTRY POINT
@@ -155,8 +167,22 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="RAG using agentic huggingface")
     parser.add_argument("--db_refresh", action="store_true", help="Reindex vector database?")
+    parser.add_argument("--temperature", type=float, default=0.5, help="Temperature")
+    parser.add_argument("--retriver_k", type=int, default=7, help="Retriever tool k")
+    parser.add_argument("--model", type=str, default="gpt-4o-mini", help="Model name")
     # parser.add_argument("--cleanup", action="store_true", help="Cleanup files on success?")
-    # parser.add_argument("--s3_bucket", type=str, default=S3_BUCKET_IN, help="S3 bucket")
+    parser.add_argument("--log", type=str, default="ERROR", help="Log level, e.g. DEBUG, INFO, WARNING, ERROR, CRITICAL")
     args = parser.parse_args()
+    print(args)
+    print()
+
+    # https://docs.python.org/3/howto/logging.html
+    # assuming loglevel is bound to the string value obtained from the
+    # command line argument. Convert to upper case to allow the user to
+    # specify --log=DEBUG or --log=debug
+    numeric_level = getattr(logging, args.log.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError('Invalid log level: %s' % args.log)
+    logging.basicConfig(level=numeric_level)
 
     main(args)
