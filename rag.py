@@ -1,33 +1,21 @@
+import argparse
 from transformers import AutoTokenizer
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from langchain_core.runnables.config import run_in_executor
-from langchain_core.vectorstores import VectorStore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-# from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores.utils import DistanceStrategy
 from tqdm import tqdm
 from transformers.agents import ReactJsonAgent
-from huggingface_hub import InferenceClient
 import logging
-# from IPython.display import display, Markdown
 
+from utils.ollama_engine import OllamaEngine
+# from IPython.display import display, Markdown
 from utils.openai_engine import OpenAIEngine
 from utils.retriever_tool import RetrieverTool
 
-# Set up logging
-logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
-
-# PIPELINE
-CONTENT_PATH_DIR = "/Users/johnday/repos/md"
-INDEX_DIR = f"{CONTENT_PATH_DIR}/faiss_index_hybris"
-MAX_ITERATIONS = 6
-VERBOSE = -1
-chunk_size = 200
-chunk_overlap = 20
 
 ##################
 # FUNCTIONS
@@ -35,6 +23,7 @@ chunk_overlap = 20
 def load_content_files(content_dir: str) -> list[Document]:
     from pathlib import Path
     import re
+    METADATA_IGNORE = ['', 'Users', 'johnday', 'repos', 'md', 'Documents', 'projects', 'project-bob', 'data']
 
     def clean_text(file) -> str:
         with open(file, 'r') as f:
@@ -47,13 +36,12 @@ def load_content_files(content_dir: str) -> list[Document]:
     def get_data(md_dir) -> list[Document]:
         # Document {page_content, metadata}
         def metadata_by_path(path: str) -> list[str]:
-            node = [x for x in path.split("/") if x != '' and x != 'Users' and x != 'johnday' and x != 'repos' and x != 'md' and not x.endswith('.md')]
-            # return comma delimited string from node
+            node = [x for x in path.split("/") if x not in METADATA_IGNORE and not x.endswith('.md')]
             return node
 
         docs = []
         for file in list(Path(md_dir).rglob('*.md')):
-            doc = Document(page_content=clean_text(file), metadata=dict(id=str(file), title=file.stem, subject=metadata_by_path(str(file))))
+            doc = Document(page_content=clean_text(file), metadata=dict(id=str(file), title=file.stem, tags=metadata_by_path(str(file))))
             docs.append(doc)
         return docs
 
@@ -78,24 +66,27 @@ Question:
 
 def embedding_model():
     return HuggingFaceEmbeddings(model_name="thenlper/gte-small")
-def pipeline():
-    source_docs = load_content_files(CONTENT_PATH_DIR)
-    print(len(source_docs))
+def pipeline(args):
+    confirm = input("Are you sure you want to reindex the database? (y/[n]): ")
+    if not confirm or confirm.lower() != "y":
+        print("Exiting pipeline...")
+        return
+    source_docs = load_content_files(args.content_path_dir)
     print()
-    # print(source_docs[0])
+    logger.info(f"source_docs[0]:  {source_docs[0]}")
 
     tokenizer = AutoTokenizer.from_pretrained("thenlper/gte-small")
     text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
         tokenizer,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
         add_start_index=True,
         strip_whitespace=True,
         separators=["\n\n", "\n", ".", "  ", " ", ""],
     )
 
     # Split documents and remove duplicates
-    print("Splitting documents...")
+    print(f"Splitting {len(source_docs)} documents...")
     docs_processed = []
     unique_texts = {}
     for doc in tqdm(source_docs):
@@ -114,34 +105,55 @@ def pipeline():
         embedding=embedding_model(),
         distance_strategy=DistanceStrategy.COSINE,
     )
-    vectordb.save_local(INDEX_DIR)
+    vectordb.save_local(args.index_dir)
     print("Vector database created successfully")
-
-    return vectordb
 
 def load_vectordb(vectordb_path: str, embeddings: Embeddings) -> FAISS:
     return FAISS.load_local(folder_path=vectordb_path, embeddings=embeddings, allow_dangerous_deserialization=True)
 
-def print_metadata(metadata):
+def print_metadata(metadata) -> None:
     print("METADATA:")
+    logger.debug(f"metadata: {metadata}")
     metadata_ids = []
     i = 1
     for index, entry in enumerate(metadata, start=1):
         if entry['id'] not in metadata_ids:
-            print(f"{i}. {entry['title'].replace('-', ' ').title()}:  \"{entry['id']}\"\n")
+            print(f"{i}. {entry['title']}:  \"{entry['id']}\"")
+            print(f"     tags: {entry['tags']}")
         metadata_ids.append(entry['id'])
         i += 1
 
+def init(args) -> None:
+    # https://docs.python.org/3/howto/logging.html
+    # assuming loglevel is bound to the string value obtained from the
+    # command line argument. Convert to upper case to allow the user to
+    # specify --log=DEBUG or --log=debug
+    numeric_level = getattr(logging, args.log.upper(), 'ERROR')
+    logger.debug(f"numeric_level: {numeric_level}")
+    if not isinstance(numeric_level, int):
+        raise ValueError('Invalid log level: %s' % args.log)
+    logging.basicConfig(level=numeric_level)
+
+    # remove cache
+
+def llm_engine_factory(model_name: str, temperature: float):
+    if model_name.startswith('gpt'):
+        return OpenAIEngine(temperature=temperature, model_name=model_name)
+    if model_name == "llama3" or model_name == "ollama":
+        return OllamaEngine(temperature=temperature, model_name=model_name)
+    raise ValueError(f"Unknown model name: {model_name}")
 
 # MAIN
 def main(args) -> None:
     if args.db_refresh:
-        vectordb = pipeline()
+        pipeline(args)
+        exit(0)
     else:
-        vectordb = load_vectordb(f"{INDEX_DIR}", embedding_model())
+        vectordb = load_vectordb(args.index_dir, embedding_model())
 
     retriever_tool = RetrieverTool(vectordb, k=args.retriver_k)
-    llm_engine = OpenAIEngine(temperature=args.temperature, model_name=args.model)
+    # llm_engine = OpenAIEngine(temperature=args.temperature, model_name=args.model)
+    llm_engine = llm_engine_factory(args.model, args.temperature)
 
     while True:
         question = input("QUESTION: ")
@@ -149,7 +161,7 @@ def main(args) -> None:
         if question_lower == "exit" or question_lower == "quit" or question_lower == "q" or question_lower == "":
             break
 
-        agent = ReactJsonAgent(tools=[retriever_tool], llm_engine=llm_engine, max_iterations=MAX_ITERATIONS, verbose=VERBOSE)
+        agent = ReactJsonAgent(tools=[retriever_tool], llm_engine=llm_engine, max_iterations=args.max_iterations)
         agent.logger.setLevel(logging.CRITICAL)
 
         answer = run_agentic_rag(question, agent)
@@ -163,26 +175,35 @@ def main(args) -> None:
 # ENTRY POINT
 ##################
 if __name__ == "__main__":
-    import argparse
+    BASE_INDEX_DIR = "/Users/johnday/repos/md/indexes"
+    BASE_CONTENT_PATH_DIR = "/Users/johnday/repos/md/data"
 
+    HYBRIS_CONTENT_PATH_DIR = BASE_CONTENT_PATH_DIR
+    HYBRIS_INDEX_DIR = f"{BASE_INDEX_DIR}/faiss_index_hybris"
+
+    MEETING_CONTENT_PATH_DIR = "/Users/johnday/Documents/projects/project-bob/transcripts/meetings"
+    MEETING_INDEX_DIR = f"{BASE_INDEX_DIR}/faiss_index_meeting"
+
+    # https://docs.python.org/3/library/argparse.html#default
     parser = argparse.ArgumentParser(description="RAG using agentic huggingface")
     parser.add_argument("--db_refresh", action="store_true", help="Reindex vector database?")
     parser.add_argument("--temperature", type=float, default=0.5, help="Temperature")
     parser.add_argument("--retriver_k", type=int, default=7, help="Retriever tool k")
     parser.add_argument("--model", type=str, default="gpt-4o-mini", help="Model name")
-    # parser.add_argument("--cleanup", action="store_true", help="Cleanup files on success?")
-    parser.add_argument("--log", type=str, default="ERROR", help="Log level, e.g. DEBUG, INFO, WARNING, ERROR, CRITICAL")
+    parser.add_argument("--log", type=str, default="ERROR", help="Log level")
+    parser.add_argument("--db", type=str, choices=['meeting', 'hybris'], default="hybris", help="Database to use")
+    parser.add_argument("--content_path_dir", type=str, default=HYBRIS_CONTENT_PATH_DIR, help="Path to content directory")
+    parser.add_argument("--index_dir", type=str, default=HYBRIS_INDEX_DIR, help="Path to index")
+    parser.add_argument("--max_iterations", type=str, default=6, help="Max iterations")
+    parser.add_argument("--chunk_size", type=int, default=200, help="Chunk size")
+    parser.add_argument("--chunk_overlap", type=int, default=40, help="Chunk overlap")
     args = parser.parse_args()
+    if args.db == "meeting":
+        args.content_path_dir = MEETING_CONTENT_PATH_DIR
+        args.index_dir = MEETING_INDEX_DIR
     print(args)
     print()
 
-    # https://docs.python.org/3/howto/logging.html
-    # assuming loglevel is bound to the string value obtained from the
-    # command line argument. Convert to upper case to allow the user to
-    # specify --log=DEBUG or --log=debug
-    numeric_level = getattr(logging, args.log.upper(), None)
-    if not isinstance(numeric_level, int):
-        raise ValueError('Invalid log level: %s' % args.log)
-    logging.basicConfig(level=numeric_level)
+    init(args)
 
     main(args)
