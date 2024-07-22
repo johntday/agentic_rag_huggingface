@@ -10,7 +10,7 @@ openai_role_conversions = {
 }
 
 class OpenAIEngine:
-    def __init__(self, model_name="gpt-4o-mini", temperature=0.5):
+    def __init__(self, model_name, temperature):
         assert model_name
         assert temperature
         self.model_name = model_name

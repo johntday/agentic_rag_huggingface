@@ -24,6 +24,8 @@ def load_content_files(content_dir: str) -> list[Document]:
     from pathlib import Path
     import re
     METADATA_IGNORE = ['', 'Users', 'johnday', 'repos', 'md', 'Documents', 'projects', 'project-bob', 'data']
+    tags = []
+    paths = []
 
     def clean_text(file) -> str:
         with open(file, 'r') as f:
@@ -36,13 +38,30 @@ def load_content_files(content_dir: str) -> list[Document]:
     def get_data(md_dir) -> list[Document]:
         # Document {page_content, metadata}
         def metadata_by_path(path: str) -> list[str]:
-            node = [x for x in path.split("/") if x not in METADATA_IGNORE and not x.endswith('.md')]
-            return node
+            paths.append(path)
+            nodes = [x for x in path.split("/") if x not in METADATA_IGNORE and not x.endswith('.md')]
+            tags.extend([x for x in nodes])
+            return nodes
 
         docs = []
         for file in list(Path(md_dir).rglob('*.md')):
             doc = Document(page_content=clean_text(file), metadata=dict(id=str(file), title=file.stem, tags=metadata_by_path(str(file))))
             docs.append(doc)
+
+        # write tags to file
+        tags_unique = list(set(tags))
+        tags_unique.sort()
+        with open(f"{md_dir}/tags.txt", "w") as f:
+            for t in tags_unique:
+                f.write(f"{t}\n")
+
+        # write paths to file
+        paths_unique = list(set(paths))
+        paths_unique.sort()
+        with open(f"{md_dir}/paths.txt", "w") as f:
+            for t in paths_unique:
+                f.write(f"{t}\n")
+
         return docs
 
     return get_data(content_dir)
@@ -139,7 +158,7 @@ def init(args) -> None:
 def llm_engine_factory(model_name: str, temperature: float):
     if model_name.startswith('gpt'):
         return OpenAIEngine(temperature=temperature, model_name=model_name)
-    if model_name == "llama3" or model_name == "ollama":
+    if model_name == "llama3":
         return OllamaEngine(temperature=temperature, model_name=model_name)
     raise ValueError(f"Unknown model name: {model_name}")
 
@@ -151,7 +170,7 @@ def main(args) -> None:
     else:
         vectordb = load_vectordb(args.index_dir, embedding_model())
 
-    retriever_tool = RetrieverTool(vectordb, k=args.retriver_k)
+    retriever_tool = RetrieverTool(vectordb, k=args.retriver_k, filter=args.filter)
     # llm_engine = OpenAIEngine(temperature=args.temperature, model_name=args.model)
     llm_engine = llm_engine_factory(args.model, args.temperature)
 
@@ -197,6 +216,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_iterations", type=str, default=6, help="Max iterations")
     parser.add_argument("--chunk_size", type=int, default=200, help="Chunk size")
     parser.add_argument("--chunk_overlap", type=int, default=40, help="Chunk overlap")
+    parser.add_argument("--filter", type=str, default=None, help="Filter vectordb search by metadata")
     args = parser.parse_args()
     if args.db == "meeting":
         args.content_path_dir = MEETING_CONTENT_PATH_DIR
