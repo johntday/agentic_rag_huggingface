@@ -7,4 +7,5 @@ huggingface_hub~=0.23.4
 ipython~=8.26.0
 prompt-toolkit~=3.0.47
 ollama~=0.3.0
-openai
+openai~=1.35.14
+ruff~=0.7.2
